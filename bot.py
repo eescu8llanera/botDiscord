@@ -610,69 +610,64 @@ async def pleno(ctx, resultado: str):
 # Ejemplo: !informe8
 # Guarda el pronostico del Pleno al 15 del usuario.
 
-def calcular_elige8(pronosticos):
-    conteo = {}
+#def calcular_elige8(pronosticos):
+#    conteo = {}
+#
+#   # Recolectar signos por partido
+#    for partidos in pronosticos.values():
+#        for partido, signo in partidos.items():
+#            conteo.setdefault(partido, []).append(signo)
+#
+#    # Calcular porcentaje del signo más común
+#    porcentajes = {
+#        partido: Counter(lista).most_common(1)[0][1] / len(lista)
+#        for partido, lista in conteo.items()
+#    }
+#
+#    # Ordenar por porcentaje
+#    partidos_ordenados = sorted(
+#        porcentajes.items(),
+#        key=lambda x: x[1],
+#        reverse=True
+#    )
+#
+#    # Tomar los 8 mejores
+#    elige8 = partidos_ordenados[:8]
+#
+#    # Resultado final
+#    return {
+#        partido: Counter(conteo[partido]).most_common(1)[0][0]
+#        for partido, _ in elige8
+#    }
 
-    # Recolectar signos por partido
-    for partidos in pronosticos.values():
-        for partido, signo in partidos.items():
-            conteo.setdefault(partido, []).append(signo)
-
-    # Calcular porcentaje del signo más común
-    porcentajes = {
-        partido: Counter(lista).most_common(1)[0][1] / len(lista)
-        for partido, lista in conteo.items()
-    }
-
-    # Ordenar por porcentaje
-    partidos_ordenados = sorted(
-        porcentajes.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    # Tomar los 8 mejores
-    elige8 = partidos_ordenados[:8]
-
-    # Resultado final
-    return {
-        partido: Counter(conteo[partido]).most_common(1)[0][0]
-        for partido, _ in elige8
-    }
-
-
-@bot.command(name="informe8")
-async def informe8(ctx):
+@bot.command(name="elige8")
+async def elige8(ctx):
     datos = cargar_datos()
-    resultados = calcular_elige8(datos["pronosticos"])
 
-    lineas = ["**Informe ELIGE8**"]
+    # Construir pronósticos globales
+    pronosticos_globales = {}
+
+    for jornada in datos["jornadas"].values():
+        pronos = jornada.get("pronosticos", {})
+        for usuario, partidos in pronos.items():
+            # Unir pronósticos de distintas jornadas
+            if usuario not in pronosticos_globales:
+                pronosticos_globales[usuario] = {}
+            pronosticos_globales[usuario].update(partidos)
+
+    if not pronosticos_globales:
+        await ctx.send("Todavía no hay pronósticos registrados.")
+        return
+
+    resultados = calcular_elige8(pronosticos_globales)
+
+    lineas = ["**Informe ELIGE8 (partidos con mayor consenso):**"]
     for partido, signo in resultados.items():
         lineas.append(f"Partido {partido}: **{signo}**")
 
     await ctx.send("\n".join(lineas))
 
-    # Ordenar partidos por consenso
-    partidos_ordenados = sorted(porcentajes.items(), key=lambda x: x[1], reverse=True)
-
-    # Seleccionar los 8 partidos con mayor consenso
-    elige8 = partidos_ordenados[:8]
-
-    # Construir informe visual
-    mensaje = "📊 **ELIGE8 – Partidos con mayor consenso**\n\n"
-    emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣"]
-
-    for i, (partido, porcentaje) in enumerate(elige8):
-        signo_mas_votado = Counter(conteo[partido]).most_common(1)[0][0]
-        porcentaje_txt = round(porcentaje * 100)
-
-        mensaje += (
-            f"{emojis[i]} Partido {partido} — {porcentaje_txt}% → Resultado: {signo_mas_votado}\n"
-        )
-
-    mensaje += "\n🧠 *Elige8 calculado según el consenso de los jugadores.*"
-
-    await ctx.send(mensaje)
+###############################################################
 
 
 # Metodo interno.
