@@ -644,16 +644,13 @@ async def pleno(ctx, resultado: str):
 async def elige8(ctx):
     datos = cargar_datos()
 
-    # Construir pronósticos globales
     pronosticos_globales = {}
 
+    # Recorrer todas las jornadas
     for jornada in datos["jornadas"].values():
         pronos = jornada.get("pronosticos", {})
         for usuario, partidos in pronos.items():
-            # Unir pronósticos de distintas jornadas
-            if usuario not in pronosticos_globales:
-                pronosticos_globales[usuario] = {}
-            pronosticos_globales[usuario].update(partidos)
+            pronosticos_globales.setdefault(usuario, {}).update(partidos)
 
     if not pronosticos_globales:
         await ctx.send("Todavía no hay pronósticos registrados.")
@@ -666,6 +663,7 @@ async def elige8(ctx):
         lineas.append(f"Partido {partido}: **{signo}**")
 
     await ctx.send("\n".join(lineas))
+
 
 ###############################################################
 
