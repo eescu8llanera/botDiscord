@@ -120,6 +120,13 @@ def clave_partido(item):
     return (0, int(numero)) if str(numero).isdigit() else (1, str(numero))
 
 
+def descripcion_partido(jornada, partido):
+    descripcion = jornada.get("partidos", {}).get(str(partido))
+    if descripcion:
+        return f"Partido {partido} - {descripcion}"
+    return f"Partido {partido}"
+
+
 def recalcular_clasificacion(datos):
     clasificacion = {}
 
@@ -189,11 +196,12 @@ async def ayuda_quiniela(ctx):
     await ctx.send(
         "**Comandos de la quiniela**\n"
         "`!crearjornada <numero>` - crea y activa una jornada. Admin.\n"
-        "`!partido <numero> <local> vs <visitante>` - aÃ±ade un partido. Admin.\n"
+        "`!partido <numero> <local> vs <visitante>` - añade un partido. Admin.\n"
         "`!cerrarjornada` / `!abrirjornada` - bloquea o reabre apuestas. Admin.\n"
-        "`!apostar <partido> <1|X|2>` - guarda tu pronÃ³stico.\n"
-        "`!mispronosticos` - muestra tus pronÃ³sticos.\n"
-        "`!verpronosticos` - muestra todos los pronÃ³sticos.\n"
+        "`!apostar <partido> <1|X|2>` - guarda tu pronóstico.\n"
+        "`!mispronosticos` - muestra tus pronósticos.\n"
+        "`!verpronosticos` - muestra todos los pronósticos.\n"
+        "`!partidos` / `!listarpartidos` - muestra la lista de partidos.\n"
         "`!resultado <partido> <1|X|2>` - guarda resultado oficial. Admin.\n"
         "`!calcular` - recalcula puntos. Admin.\n"
         "`!clasificacion` - muestra la tabla general.\n"
@@ -248,7 +256,7 @@ async def agregar_partido(ctx, numero, *, descripcion):
 # Comando: !partidos
 # Formato correcto: !partidos
 # Muestra los partidos configurados en la jornada activa.
-@bot.command(name="partidos")
+@bot.command(name="partidos", aliases=["listarpartidos"])
 async def ver_partidos(ctx):
     datos = cargar_datos()
     jornada_id, jornada = jornada_actual(datos)
@@ -256,7 +264,7 @@ async def ver_partidos(ctx):
         await ctx.send("No hay jornada activa.")
         return
     if not jornada["partidos"]:
-        await ctx.send(f"La jornada {jornada_id} todavÃ­a no tiene partidos.")
+        await ctx.send(f"La jornada {jornada_id} todavía no tiene partidos.")
         return
 
     lineas = [f"**Jornada {jornada_id}**"]
@@ -264,6 +272,7 @@ async def ver_partidos(ctx):
     lineas.append(f"Estado: {estado}")
     for numero, descripcion in sorted(jornada["partidos"].items(), key=clave_partido):
         lineas.append(f"`{numero}` - {descripcion}")
+    lineas.append("`15` - Pleno al 15")
     await ctx.send("\n".join(lineas))
 
 
@@ -280,7 +289,7 @@ async def apostar(ctx, partido, signo):
         await ctx.send("No hay jornada activa.")
         return
     if not jornada.get("abierta"):
-        await ctx.send("La jornada estÃ¡ cerrada. Ya no se pueden cambiar pronÃ³sticos.")
+        await ctx.send("La jornada está cerrada. Ya no se pueden cambiar pronósticos.")
         return
     if str(partido) not in jornada["partidos"]:
         await ctx.send("Ese partido no existe en la jornada activa. Usa `!partidos`.")
@@ -295,7 +304,7 @@ async def apostar(ctx, partido, signo):
     usuario_id = str(ctx.author.id)
     jornada["pronosticos"].setdefault(usuario_id, {})[str(partido)] = signo
     guardar_datos(datos)
-    await ctx.send(f"PronÃ³stico guardado: partido {partido} -> {signo}.")
+    await ctx.send(f"Pronóstico guardado: partido {partido} -> {signo}.")
 
 
 # Comando: !mispronosticos
@@ -311,10 +320,10 @@ async def mis_pronosticos(ctx):
 
     pronosticos = jornada["pronosticos"].get(str(ctx.author.id), {})
     if not pronosticos:
-        await ctx.send("AÃºn no tienes pronÃ³sticos en la jornada activa.")
+        await ctx.send("Aún no tienes pronósticos en la jornada activa.")
         return
 
-    lineas = [f"**Tus pronÃ³sticos - Jornada {jornada_id}**"]
+    lineas = [f"**Tus pronósticos - Jornada {jornada_id}**"]
     for partido, signo in sorted(pronosticos.items(), key=clave_partido):
         descripcion = jornada["partidos"].get(partido, "Partido sin descripciÃ³n")
         lineas.append(f"`{partido}` {descripcion}: **{signo}**")
@@ -331,15 +340,20 @@ async def ver_pronosticos(ctx):
     if not jornada:
         await ctx.send("No hay jornada activa.")
         return
-    if not jornada["pronosticos"]:
-        await ctx.send("AÃºn no hay pronÃ³sticos registrados.")
+    usuarios_con_pronostico = set(jornada["pronosticos"].keys()) | set(datos.get("pleno15", {}).keys())
+    if not usuarios_con_pronostico:
+        await ctx.send("Aún no hay pronósticos registrados.")
         return
 
-    lineas = [f"**PronÃ³sticos de la jornada {jornada_id}**"]
-    for usuario_id, pronosticos in jornada["pronosticos"].items():
+    lineas = [f"**pronósticos de la jornada {jornada_id}**"]
+    for usuario_id in usuarios_con_pronostico:
+        pronosticos = jornada["pronosticos"].get(usuario_id, {})
         lineas.append(f"**{await nombre_usuario(usuario_id)}**")
         for partido, signo in sorted(pronosticos.items(), key=clave_partido):
-            lineas.append(f"`{partido}`: {signo}")
+            lineas.append(f"`{descripcion_partido(jornada, partido)}`: {signo}")
+        pleno = datos.get("pleno15", {}).get(usuario_id)
+        if pleno:
+            lineas.append(f"`Partido 15 - Pleno al 15`: {pleno}")
     await ctx.send("\n".join(lineas))
 
 
@@ -417,7 +431,7 @@ async def calcular(ctx):
     datos = cargar_datos()
     recalcular_clasificacion(datos)
     guardar_datos(datos)
-    await ctx.send("ClasificaciÃ³n recalculada.")
+    await ctx.send("Clasificación recalculada.")
 
 
 # Comando: !clasificacion
@@ -431,7 +445,7 @@ async def clasificacion(ctx):
 
     tabla = datos["clasificacion"]
     if not tabla:
-        await ctx.send("TodavÃ­a no hay puntos calculados.")
+        await ctx.send("Todavía no hay puntos calculados.")
         return
 
     ordenada = sorted(
@@ -439,7 +453,7 @@ async def clasificacion(ctx):
         key=lambda item: (item[1]["puntos"], item[1]["aciertos"]),
         reverse=True,
     )
-    lineas = ["**ClasificaciÃ³n general**"]
+    lineas = ["**Clasificación general**"]
     for posicion, (usuario_id, fila) in enumerate(ordenada, start=1):
         nombre = await nombre_usuario(usuario_id)
         lineas.append(
@@ -462,7 +476,7 @@ async def penalizar(ctx, miembro: discord.Member, puntos: int):
     datos["penalizaciones"][usuario_id] = datos["penalizaciones"].get(usuario_id, 0) + puntos
     recalcular_clasificacion(datos)
     guardar_datos(datos)
-    await ctx.send(f"PenalizaciÃ³n aplicada a {miembro.display_name}: -{puntos} puntos.")
+    await ctx.send(f"Penalización aplicada a {miembro.display_name}: -{puntos} puntos.")
 
 # Comando: !pleno
 # Formato correcto: !pleno <goles-local>-<goles-visitante>
