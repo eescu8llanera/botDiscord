@@ -56,15 +56,49 @@ def cargar_datos():
         datos.setdefault(clave, valor.copy() if isinstance(valor, dict) else valor)
 
     # Compatibilidad con el primer formato del proyecto.
-    if "pronosticos" in datos and datos["pronosticos"] and not datos["jornadas"]:
-        datos["jornada_activa"] = "1"
-        datos["jornadas"]["1"] = {
-            "abierta": True,
-            "partidos": {},
-            "pronosticos": datos.get("pronosticos", {}),
-            "resultados": datos.get("resultados", {}),
-            "creada_en": ahora_iso(),
-        }
+    @bot.command()
+async def jornada(ctx, pronos: str, pleno: str):
+    datos = cargar_datos()
+    usuario = str(ctx.author.id)
+
+    # Validación de longitud (8 partidos)
+    if len(pronos) != 8:
+        await ctx.send("❌ Debes enviar exactamente 8 signos (1, X o 2). Ejemplo: 1X2X12X1")
+        return
+
+    # Validación de signos
+    for s in pronos:
+        if s.upper() not in ["1", "X", "2"]:
+            await ctx.send("❌ Solo se permiten signos 1, X o 2.")
+            return
+
+    # Validación del pleno al 15
+    try:
+        g1, g2 = pleno.split("-")
+        g1 = int(g1)
+        g2 = int(g2)
+    except:
+        await ctx.send("❌ El pleno debe tener formato número-número. Ejemplo: 2-1")
+        return
+
+    # Guardar pronósticos
+    if usuario not in datos["pronosticos"]:
+        datos["pronosticos"][usuario] = {}
+
+    for i, signo in enumerate(pronos, start=1):
+        datos["pronosticos"][usuario][str(i)] = signo.upper()
+
+    # Guardar pleno al 15
+    datos["pleno15"][usuario] = pleno
+
+    guardar_datos(datos)
+
+    await ctx.send(
+        f"📝 Jornada registrada para **{ctx.author.display_name}**\n"
+        f"• Partidos: {pronos}\n"
+        f"• Pleno al 15: {pleno}"
+    )
+
 
     return datos
 
