@@ -62,15 +62,26 @@ def es_admin(ctx):
 def cargar_datos():
     if not os.path.exists(RUTA_DATOS):
         guardar_datos(DATOS_BASE.copy())
+        return DATOS_BASE.copy()
 
     with open(RUTA_DATOS, "r", encoding="utf-8") as archivo:
-        try:
-            datos = json.load(archivo)
-        except json.JSONDecodeError:
-            datos = DATOS_BASE.copy()
+        datos = json.load(archivo)
 
-    for clave, valor in DATOS_BASE.items():
-        datos.setdefault(clave, valor.copy() if isinstance(valor, dict) else valor)
+    # Asegurar estructura mínima
+    if datos.get("jornadas") is None:
+        datos["jornadas"] = {}
+
+    if datos.get("clasificacion") is None:
+        datos["clasificacion"] = {}
+
+    if datos.get("penalizaciones") is None:
+        datos["penalizaciones"] = {}
+
+    if datos.get("pleno15") is None:
+        datos["pleno15"] = {}
+
+    return datos
+
 
 def guardar_datos(datos):
     with open(RUTA_DATOS, "w", encoding="utf-8") as archivo:
