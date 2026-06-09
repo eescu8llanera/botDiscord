@@ -19,6 +19,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ============================
+#   ESTRUCTURA BASE DE DATOS
+# ============================
 
 DATOS_BASE = {
     "jornada_activa": None,
@@ -30,6 +33,9 @@ DATOS_BASE = {
     "resultados": {},
 }
 
+# ============================
+#   FUNCIONES INTERNAS
+# ============================
 
 def ahora_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -54,54 +60,6 @@ def cargar_datos():
 
     for clave, valor in DATOS_BASE.items():
         datos.setdefault(clave, valor.copy() if isinstance(valor, dict) else valor)
-
-    # Compatibilidad con el primer formato del proyecto.
-    @bot.command()
-async def jornada(ctx, pronos: str, pleno: str):
-    datos = cargar_datos()
-    usuario = str(ctx.author.id)
-
-    # Validación de longitud (8 partidos)
-    if len(pronos) != 8:
-        await ctx.send("❌ Debes enviar exactamente 8 signos (1, X o 2). Ejemplo: 1X2X12X1")
-        return
-
-    # Validación de signos
-    for s in pronos:
-        if s.upper() not in ["1", "X", "2"]:
-            await ctx.send("❌ Solo se permiten signos 1, X o 2.")
-            return
-
-    # Validación del pleno al 15
-    try:
-        g1, g2 = pleno.split("-")
-        g1 = int(g1)
-        g2 = int(g2)
-    except:
-        await ctx.send("❌ El pleno debe tener formato número-número. Ejemplo: 2-1")
-        return
-
-    # Guardar pronósticos
-    if usuario not in datos["pronosticos"]:
-        datos["pronosticos"][usuario] = {}
-
-    for i, signo in enumerate(pronos, start=1):
-        datos["pronosticos"][usuario][str(i)] = signo.upper()
-
-    # Guardar pleno al 15
-    datos["pleno15"][usuario] = pleno
-
-    guardar_datos(datos)
-
-    await ctx.send(
-        f"📝 Jornada registrada para **{ctx.author.display_name}**\n"
-        f"• Partidos: {pronos}\n"
-        f"• Pleno al 15: {pleno}"
-    )
-
-
-    return datos
-
 
 def guardar_datos(datos):
     with open(RUTA_DATOS, "w", encoding="utf-8") as archivo:
@@ -173,6 +131,89 @@ async def nombre_usuario(usuario_id):
 def es_admin(ctx):
     return ctx.author.guild_permissions.manage_guild
 
+# ============================
+#   CÁLCULO PLENO AL 15
+# ============================
+
+def calcular_pleno_media_jornada(jornada):
+    plenos = jornada.get("pleno15", {})
+    if not plenos:
+        return None
+
+    goles1 = []
+    goles2 = []
+
+    for res in plenos.values():
+        g1, g2 = map(int, res.split("-"))
+        goles1.append(g1)
+        goles2.append(g2)
+
+    media1 = round(sum(goles1) / len(goles1))
+    media2 = round(sum(goles2) / len(goles2))
+
+    return f"{media1}-{media2}"
+
+# ============================
+#   CÁLCULO ELIGE8
+# ============================
+
+def calcular_elige8(pronosticos):
+    conteo = {}
+
+    for usuario, partidos in pronosticos.items():
+        for partido, signo in partidos.items():
+            conteo.setdefault(partido, []).append(signo)
+
+    porcentajes = {}
+
+    for partido, lista in conteo.items():
+        total = len(lista)
+        mas_comun = Counter(lista).most_common(1)[0][1]
+        porcentajes[partido] = mas_comun / total
+
+    partidos_ordenados = sorted(porcentajes.items(), key=lambda x: x[1], reverse=True)
+    elige8 = partidos_ordenados[:8]
+
+    resultados = {}
+
+    for partido, _ in elige8:
+        signo = Counter(conteo[partido]).most_common(1)[0][0]
+        resultados[partido] = signo
+
+    return resultados
+
+# ============================
+#   CLASIFICACIÓN GENERAL
+# ============================
+
+def recalcular_clasificacion(datos):
+    clasificacion = {}
+
+    for jornada in datos["jornadas"].values():
+        resultados = jornada.get("resultados", {})
+
+        for usuario_id, pronos in jornada.get("pronosticos", {}).items():
+            puntos = 0
+            aciertos = 0
+            jugados = 0
+
+            for partido, signo in pronos.items():
+                if partido in resultados:
+                    jugados += 1
+                    if signo == resultados[partido]:
+                        aciertos += 1
+                        puntos += PUNTOS_ACIERTO
+
+            fila = clasificacion.setdefault(usuario_id, {"puntos": 0, "aciertos": 0, "jugados": 0})
+            fila["puntos"] += puntos
+            fila["aciertos"] += aciertos
+            fila["jugados"] += jugados
+
+    datos["clasificacion"] = clasificacion
+
+# ============================
+#   EVENTOS Y COMANDOS
+# ============================
 
 # Evento automatico: se ejecuta cuando el bot se conecta correctamente.
 @bot.event
@@ -202,7 +243,7 @@ async def ayuda_quiniela(ctx):
         "`!mispronosticos` - muestra tus pronósticos.\n"
         "`!verpronosticos` - muestra todos los pronósticos.\n"
         "`!partidos` / `!listarpartidos` - muestra la lista de partidos.\n"
-        "`!resultado <partido> <1|X|2>` - guarda resultado oficial. Admin.\n"
+        "`!resultado / `!apostar 1X12X212X112X1 2-0` - guarda resultado oficial. Admin.\n"
         "`!calcular` - recalcula puntos. Admin.\n"
         "`!clasificacion` - muestra la tabla general.\n"
         "`!penalizar @usuario <puntos>` - resta puntos. Admin."
@@ -275,37 +316,64 @@ async def ver_partidos(ctx):
     lineas.append("`15` - Pleno al 15")
     await ctx.send("\n".join(lineas))
 
+# ============================
+#   APOSTAR
+# ============================
 
 # Comando: !apostar
 # Formato correcto: !apostar <numero_partido> <signo>
 # Signos validos: 1, X o 2
-# Ejemplo: !apostar 1 X
+# Ejemplo: !apostar 1X12X212X112X1 2-0
 # Guarda o actualiza tu pronostico para un partido de la jornada activa.
 @bot.command(name="apostar")
-async def apostar(ctx, partido, signo):
+async def jornada(ctx, pronos: str, pleno: str):
     datos = cargar_datos()
-    jornada_id, jornada = jornada_actual(datos)
-    if not jornada:
-        await ctx.send("No hay jornada activa.")
-        return
-    if not jornada.get("abierta"):
-        await ctx.send("La jornada está cerrada. Ya no se pueden cambiar pronósticos.")
-        return
-    if str(partido) not in jornada["partidos"]:
-        await ctx.send("Ese partido no existe en la jornada activa. Usa `!partidos`.")
+    usuario = str(ctx.author.id)
+
+    # Validación de longitud (14 partidos)
+    if len(pronos) != 14:
+        await ctx.send("❌ Debes enviar exactamente 8 signos (1, X o 2). Ejemplo: 1X2X12X1")
         return
 
+    # Validación de signos
+    for s in pronos:
+        if s.upper() not in ["1", "X", "2"]:
+            await ctx.send("❌ Solo se permiten signos 1, X o 2.")
+            return
+
+    # Validación del pleno al 15
     try:
-        signo = normalizar_signo(signo)
-    except ValueError as error:
-        await ctx.send(str(error))
+        g1, g2 = pleno.split("-")
+        g1 = int(g1)
+        g2 = int(g2)
+    except:
+        await ctx.send("❌ El pleno debe tener formato número-número. Ejemplo: 2-1")
         return
 
-    usuario_id = str(ctx.author.id)
-    jornada["pronosticos"].setdefault(usuario_id, {})[str(partido)] = signo
-    guardar_datos(datos)
-    await ctx.send(f"Pronóstico guardado: partido {partido} -> {signo}.")
+    # Guardar pronósticos
+    if usuario not in datos["pronosticos"]:
+        datos["pronosticos"][usuario] = {}
 
+    for i, signo in enumerate(pronos, start=1):
+        datos["pronosticos"][usuario][str(i)] = signo.upper()
+
+    # Guardar pleno al 15
+    datos["pleno15"][usuario] = pleno
+
+    guardar_datos(datos)
+
+    await ctx.send(
+        f"📝 Jornada registrada para **{ctx.author.display_name}**\n"
+        f"• Partidos: {pronos}\n"
+        f"• Pleno al 15: {pleno}"
+    )
+
+
+    return datos
+
+# ============================
+#   MIS PRONÓSTICOS
+# ============================
 
 # Comando: !mispronosticos
 # Formato correcto: !mispronosticos
@@ -329,6 +397,9 @@ async def mis_pronosticos(ctx):
         lineas.append(f"`{partido}` {descripcion}: **{signo}**")
     await ctx.send("\n".join(lineas))
 
+# ============================
+#   VER PRONÓSTICOS
+# ============================
 
 # Comando: !verpronosticos
 # Formato correcto: !verpronosticos
@@ -337,25 +408,37 @@ async def mis_pronosticos(ctx):
 async def ver_pronosticos(ctx):
     datos = cargar_datos()
     jornada_id, jornada = jornada_actual(datos)
+
     if not jornada:
         await ctx.send("No hay jornada activa.")
         return
-    usuarios_con_pronostico = set(jornada["pronosticos"].keys()) | set(datos.get("pleno15", {}).keys())
-    if not usuarios_con_pronostico:
-        await ctx.send("Aún no hay pronósticos registrados.")
+
+    usuarios = set(jornada["pronosticos"].keys()) | set(jornada["pleno15"].keys())
+
+    if not usuarios:
+        await ctx.send("No hay pronósticos.")
         return
 
-    lineas = [f"**pronósticos de la jornada {jornada_id}**"]
-    for usuario_id in usuarios_con_pronostico:
-        pronosticos = jornada["pronosticos"].get(usuario_id, {})
-        lineas.append(f"**{await nombre_usuario(usuario_id)}**")
-        for partido, signo in sorted(pronosticos.items(), key=clave_partido):
-            lineas.append(f"`{descripcion_partido(jornada, partido)}`: {signo}")
-        pleno = datos.get("pleno15", {}).get(usuario_id)
+    lineas = [f"**Pronósticos Jornada {jornada_id}**"]
+
+    for usuario_id in usuarios:
+        nombre = await nombre_usuario(usuario_id)
+        lineas.append(f"\n**{nombre}**")
+
+        pronos = jornada["pronosticos"].get(usuario_id, {})
+        for partido, signo in sorted(pronos.items(), key=lambda x: int(x[0])):
+            desc = jornada["partidos"].get(partido, "Partido")
+            lineas.append(f"`{partido}` {desc}: **{signo}**")
+
+        pleno = jornada["pleno15"].get(usuario_id)
         if pleno:
-            lineas.append(f"`Partido 15 - Pleno al 15`: {pleno}")
+            lineas.append(f"`15` Pleno al 15: **{pleno}**")
+
     await ctx.send("\n".join(lineas))
 
+# ============================
+#   CERRAR JORNADA
+# ============================
 
 # Comando: !cerrarjornada
 # Formato correcto: !cerrarjornada
@@ -373,6 +456,9 @@ async def cerrar_jornada(ctx):
     guardar_datos(datos)
     await ctx.send(f"Jornada {jornada_id} cerrada.")
 
+# ============================
+#   ABRIR JORNADA
+# ============================
 
 # Comando: !abrirjornada
 # Formato correcto: !abrirjornada
@@ -390,6 +476,9 @@ async def abrir_jornada(ctx):
     guardar_datos(datos)
     await ctx.send(f"Jornada {jornada_id} abierta.")
 
+# ============================
+#   RESULTADO
+# ============================
 
 # Comando: !resultado
 # Formato correcto: !resultado <numero_partido> <signo>
@@ -420,6 +509,9 @@ async def resultado(ctx, partido, signo):
     guardar_datos(datos)
     await ctx.send(f"Resultado guardado: partido {partido} -> {signo}.")
 
+# ============================
+#   CALCULAR 
+# ============================
 
 # Comando: !calcular
 # Formato correcto: !calcular
@@ -433,6 +525,9 @@ async def calcular(ctx):
     guardar_datos(datos)
     await ctx.send("Clasificación recalculada.")
 
+# ============================
+#   CLASIFICACION
+# ============================
 
 # Comando: !clasificacion
 # Formato correcto: !clasificacion
@@ -462,6 +557,9 @@ async def clasificacion(ctx):
         )
     await ctx.send("\n".join(lineas))
 
+# ============================
+#   PENALIZAR
+# ============================
 
 # Comando: !penalizar
 # Formato correcto: !penalizar @usuario <puntos>
@@ -478,6 +576,10 @@ async def penalizar(ctx, miembro: discord.Member, puntos: int):
     guardar_datos(datos)
     await ctx.send(f"Penalización aplicada a {miembro.display_name}: -{puntos} puntos.")
 
+# ============================
+#   PLENO
+# ============================
+
 # Comando: !pleno
 # Formato correcto: !pleno <goles-local>-<goles-visitante>
 # Ejemplo: !pleno 2-1
@@ -492,6 +594,63 @@ async def pleno(ctx, resultado: str):
     guardar_datos(datos)
 
     await ctx.send(f"Pleno al 15 guardado para {ctx.author.display_name}: {resultado}")
+
+# ============================
+#   CÁLCULO ELIGE8
+# ============================
+# Formato correcto: !informe8 <goles-local>-<goles-visitante>
+# Ejemplo: !informe 8
+# Guarda el pronostico del Pleno al 15 del usuario.
+
+@bot.command()
+async def informe8(ctx):
+    datos = cargar_datos()
+    pronosticos = datos["pronosticos"]
+
+    if not pronosticos:
+        await ctx.send("❌ No hay pronósticos registrados todavía.")
+        return
+
+    conteo = {}  # { partido: [lista de signos] }
+
+    # Reunir todos los signos por partido
+    for usuario, partidos in pronosticos.items():
+        for partido, signo in partidos.items():
+            if partido not in conteo:
+                conteo[partido] = []
+            conteo[partido].append(signo)
+
+    porcentajes = {}  # { partido: porcentaje_mayor }
+
+    # Calcular porcentaje mayoritario por partido
+    for partido, lista_signos in conteo.items():
+        total = len(lista_signos)
+        mas_comun = Counter(lista_signos).most_common(1)[0][1]
+        porcentaje = mas_comun / total
+        porcentajes[partido] = porcentaje
+
+    # Ordenar partidos por consenso
+    partidos_ordenados = sorted(porcentajes.items(), key=lambda x: x[1], reverse=True)
+
+    # Seleccionar los 8 partidos con mayor consenso
+    elige8 = partidos_ordenados[:8]
+
+    # Construir informe visual
+    mensaje = "📊 **ELIGE8 – Partidos con mayor consenso**\n\n"
+    emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣"]
+
+    for i, (partido, porcentaje) in enumerate(elige8):
+        signo_mas_votado = Counter(conteo[partido]).most_common(1)[0][0]
+        porcentaje_txt = round(porcentaje * 100)
+
+        mensaje += (
+            f"{emojis[i]} Partido {partido} — {porcentaje_txt}% → Resultado: {signo_mas_votado}\n"
+        )
+
+    mensaje += "\n🧠 *Elige8 calculado según el consenso de los jugadores.*"
+
+    await ctx.send(mensaje)
+
 
 # Metodo interno.
 # Formato de entrada: {"usuario_id": "2-1", "otro_usuario_id": "1-1"}
@@ -534,8 +693,38 @@ def calcular_mayorias(pronosticos):
 
     return resultados
 
+def calcular_elige8(pronosticos):
+    conteo = {}  # { partido: [lista de signos] }
 
-# Comando: !calcularautomatico
+    # Reunir todos los signos por partido
+    for usuario, partidos in pronosticos.items():
+        for partido, signo in partidos.items():
+            conteo.setdefault(partido, []).append(signo)
+
+    porcentajes = {}  # { partido: porcentaje_mayor }
+
+    # Calcular porcentaje mayoritario por partido
+    for partido, lista in conteo.items():
+        total = len(lista)
+        mas_comun = Counter(lista).most_common(1)[0][1]
+        porcentajes[partido] = mas_comun / total
+
+    # Ordenar partidos por consenso (de mayor a menor)
+    partidos_ordenados = sorted(porcentajes.items(), key=lambda x: x[1], reverse=True)
+    elige8 = partidos_ordenados[:8]
+
+    resultados = {}
+
+    for partido, _ in elige8:
+        signo_mas_votado = Counter(conteo[partido]).most_common(1)[0][0]
+        resultados[partido] = signo_mas_votado
+
+    return resultados
+
+# ============================
+#   CÁLCULO AUTOMATICO
+# ============================
+# # # Comando: !calcularautomatico
 # Formato correcto: !calcularautomatico
 # Permisos: solo administradores con permiso "Gestionar servidor".
 # Calcula automaticamente el Pleno al 15 por media y los partidos por mayoria.
@@ -543,21 +732,56 @@ def calcular_mayorias(pronosticos):
 @commands.check(es_admin)
 async def calcular_automatico(ctx):
     datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
 
-    # 1) Pleno al 15 por media
-    pleno = calcular_pleno_media(datos["pleno15"])
-    datos["resultados"]["pleno15"] = pleno
+    if not jornada:
+        await ctx.send("No hay jornada activa.")
+        return
 
-    # 2) 8 partidos por mayoria
-    mayorias = calcular_mayorias(datos["pronosticos"])
-    for partido, signo in mayorias.items():
-        datos["resultados"][partido] = signo
+    pleno = calcular_pleno_media_jornada(jornada)
+    if pleno:
+        jornada["resultados"]["pleno15"] = pleno
+
+    elige8 = calcular_elige8(jornada["pronosticos"])
+    for partido, signo in elige8.items():
+        jornada["resultados"][partido] = signo
 
     guardar_datos(datos)
 
-    await ctx.send("Resultados oficiales calculados automaticamente.")
+    await ctx.send(f"Resultados calculados.\nPleno oficial: {pleno}")
 
+# ============================
+#   CÁLCULO ELIGE8
+# ============================
 
+def calcular_elige8(pronosticos):
+    conteo = {}
+
+    for usuario, partidos in pronosticos.items():
+        for partido, signo in partidos.items():
+            conteo.setdefault(partido, []).append(signo)
+
+    porcentajes = {}
+
+    for partido, lista in conteo.items():
+        total = len(lista)
+        mas_comun = Counter(lista).most_common(1)[0][1]
+        porcentajes[partido] = mas_comun / total
+
+    partidos_ordenados = sorted(porcentajes.items(), key=lambda x: x[1], reverse=True)
+    elige8 = partidos_ordenados[:8]
+
+    resultados = {}
+
+    for partido, _ in elige8:
+        signo = Counter(conteo[partido]).most_common(1)[0][0]
+        resultados[partido] = signo
+
+    return resultados
+
+# ============================
+#   ERRORES
+# ============================
 # Evento automatico: gestiona errores de comandos y envia mensajes claros al canal.
 @bot.event
 async def on_command_error(ctx, error):
@@ -573,6 +797,9 @@ async def on_command_error(ctx, error):
         await ctx.send("Ha ocurrido un error al ejecutar el comando.")
         raise error
 
+# ============================
+#   INICIAR BOT
+# ============================
 
 if __name__ == "__main__":
     if TOKEN != '':
