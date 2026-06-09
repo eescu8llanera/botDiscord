@@ -609,7 +609,7 @@ async def pleno(ctx, resultado: str):
 # Formato correcto: !informe8 <goles-local>-<goles-visitante>
 # Ejemplo: !informe 8
 # Guarda el pronostico del Pleno al 15 del usuario.
-
+@bot.command(name="elige8")
 def calcular_elige8(pronosticos):
     conteo = {}
 
