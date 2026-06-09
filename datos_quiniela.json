@@ -1,7 +1,6 @@
 {
-    "pronosticos": {},
-    "resultados": {},
-    "puntos": {},
+    "jornada_activa": null,
+    "jornadas": {},
     "clasificacion": {},
     "penalizaciones": {}
 }

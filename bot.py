@@ -1,76 +1,531 @@
+﻿import json
+import os
+from collections import Counter
+from datetime import datetime, timezone
+
 import discord
 from discord.ext import commands
-import json
-import os
-import random
+from dotenv import load_dotenv
 
-TOKEN = "AQUI_TU_TOKEN"
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+RUTA_DATOS = "datos_quiniela.json"
+PUNTOS_ACIERTO = 1
+SIGNOS_VALIDOS = {"1", "X", "2"}
+
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
-intents.presences = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ------------------------------
-#   SISTEMA DE ARCHIVO JSON
-# ------------------------------
 
-RUTA = "datos_quiniela.json"
+DATOS_BASE = {
+    "jornada_activa": None,
+    "jornadas": {},
+    "clasificacion": {},
+    "penalizaciones": {},
+    "pleno15": {},
+    "pronosticos": {},
+    "resultados": {},
+}
+
+
+def ahora_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalizar_signo(signo):
+    signo = str(signo).strip().upper()
+    if signo not in SIGNOS_VALIDOS:
+        raise ValueError("El signo debe ser 1, X o 2.")
+    return signo
+
 
 def cargar_datos():
-    if not os.path.exists(RUTA):
-        with open(RUTA, "w") as f:
-            json.dump({
-                "pronosticos": {},
-                "resultados": {},
-                "puntos": {},
-                "clasificacion": {},
-                "penalizaciones": {}
-            }, f, indent=4)
+    if not os.path.exists(RUTA_DATOS):
+        guardar_datos(DATOS_BASE.copy())
 
-    with open(RUTA, "r") as f:
-        return json.load(f)
+    with open(RUTA_DATOS, "r", encoding="utf-8") as archivo:
+        try:
+            datos = json.load(archivo)
+        except json.JSONDecodeError:
+            datos = DATOS_BASE.copy()
+
+    for clave, valor in DATOS_BASE.items():
+        datos.setdefault(clave, valor.copy() if isinstance(valor, dict) else valor)
+
+    # Compatibilidad con el primer formato del proyecto.
+    if "pronosticos" in datos and datos["pronosticos"] and not datos["jornadas"]:
+        datos["jornada_activa"] = "1"
+        datos["jornadas"]["1"] = {
+            "abierta": True,
+            "partidos": {},
+            "pronosticos": datos.get("pronosticos", {}),
+            "resultados": datos.get("resultados", {}),
+            "creada_en": ahora_iso(),
+        }
+
+    return datos
+
 
 def guardar_datos(datos):
-    with open(RUTA, "w") as f:
-        json.dump(datos, f, indent=4)
+    with open(RUTA_DATOS, "w", encoding="utf-8") as archivo:
+        json.dump(datos, archivo, indent=4, ensure_ascii=False)
 
-# ------------------------------
-#   EVENTO DE INICIO
-# ------------------------------
 
+def jornada_actual(datos):
+    jornada_id = datos.get("jornada_activa")
+    if not jornada_id:
+        return None, None
+    return jornada_id, datos["jornadas"].get(str(jornada_id))
+
+
+def clave_partido(item):
+    numero = item[0]
+    return (0, int(numero)) if str(numero).isdigit() else (1, str(numero))
+
+
+def recalcular_clasificacion(datos):
+    clasificacion = {}
+
+    for jornada in datos["jornadas"].values():
+        resultados = jornada.get("resultados", {})
+        for usuario_id, pronosticos in jornada.get("pronosticos", {}).items():
+            puntos = 0
+            aciertos = 0
+            jugados = 0
+
+            for partido, signo in pronosticos.items():
+                if partido in resultados:
+                    jugados += 1
+                    if signo == resultados[partido]:
+                        aciertos += 1
+                        puntos += PUNTOS_ACIERTO
+
+            fila = clasificacion.setdefault(
+                usuario_id,
+                {"puntos": 0, "aciertos": 0, "jugados": 0},
+            )
+            fila["puntos"] += puntos
+            fila["aciertos"] += aciertos
+            fila["jugados"] += jugados
+
+    for usuario_id, penalizacion in datos.get("penalizaciones", {}).items():
+        fila = clasificacion.setdefault(
+            usuario_id,
+            {"puntos": 0, "aciertos": 0, "jugados": 0},
+        )
+        fila["puntos"] -= int(penalizacion)
+
+    datos["clasificacion"] = clasificacion
+
+
+async def nombre_usuario(usuario_id):
+    try:
+        usuario = await bot.fetch_user(int(usuario_id))
+        return usuario.display_name
+    except discord.DiscordException:
+        return f"Usuario {usuario_id}"
+
+
+def es_admin(ctx):
+    return ctx.author.guild_permissions.manage_guild
+
+
+# Evento automatico: se ejecuta cuando el bot se conecta correctamente.
 @bot.event
 async def on_ready():
     print(f"Bot conectado como {bot.user}")
 
-# ------------------------------
-#   COMANDO: !ping
-# ------------------------------
 
-@bot.command()
+# Comando: !ping
+# Formato correcto: !ping
+# Sirve para comprobar que el bot responde.
+@bot.command(name="ping")
 async def ping(ctx):
-    await ctx.send
+    await ctx.send("Pong.")
 
-@bot.command()
-async def verpronosticos(ctx):
+
+# Comando: !ayudaquiniela
+# Formato correcto: !ayudaquiniela
+# Muestra la lista de comandos disponibles y su formato basico.
+@bot.command(name="ayudaquiniela")
+async def ayuda_quiniela(ctx):
+    await ctx.send(
+        "**Comandos de la quiniela**\n"
+        "`!crearjornada <numero>` - crea y activa una jornada. Admin.\n"
+        "`!partido <numero> <local> vs <visitante>` - aÃ±ade un partido. Admin.\n"
+        "`!cerrarjornada` / `!abrirjornada` - bloquea o reabre apuestas. Admin.\n"
+        "`!apostar <partido> <1|X|2>` - guarda tu pronÃ³stico.\n"
+        "`!mispronosticos` - muestra tus pronÃ³sticos.\n"
+        "`!verpronosticos` - muestra todos los pronÃ³sticos.\n"
+        "`!resultado <partido> <1|X|2>` - guarda resultado oficial. Admin.\n"
+        "`!calcular` - recalcula puntos. Admin.\n"
+        "`!clasificacion` - muestra la tabla general.\n"
+        "`!penalizar @usuario <puntos>` - resta puntos. Admin."
+    )
+
+
+# Comando: !crearjornada
+# Formato correcto: !crearjornada <numero>
+# Ejemplo: !crearjornada 1
+# Permisos: solo administradores con permiso "Gestionar servidor".
+# Crea una jornada si no existe y la marca como jornada activa.
+@bot.command(name="crearjornada")
+@commands.check(es_admin)
+async def crear_jornada(ctx, numero):
     datos = cargar_datos()
-    pronos = datos["pronosticos"]
+    jornada_id = str(numero)
+    datos["jornadas"].setdefault(
+        jornada_id,
+        {
+            "abierta": True,
+            "partidos": {},
+            "pronosticos": {},
+            "resultados": {},
+            "creada_en": ahora_iso(),
+        },
+    )
+    datos["jornada_activa"] = jornada_id
+    guardar_datos(datos)
+    await ctx.send(f"Jornada {jornada_id} creada y activada.")
 
-    if not pronos:
-        await ctx.send("Aún no hay pronósticos registrados.")
+
+# Comando: !partido
+# Formato correcto: !partido <numero> <descripcion>
+# Ejemplo: !partido 1 Real Madrid vs Barcelona
+# Permisos: solo administradores con permiso "Gestionar servidor".
+# AÃ±ade o sustituye un partido dentro de la jornada activa.
+@bot.command(name="partido")
+@commands.check(es_admin)
+async def agregar_partido(ctx, numero, *, descripcion):
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await ctx.send("Primero crea una jornada con `!crearjornada <numero>`.")
         return
 
-    mensaje = "📋 **Pronósticos de la jornada**\n\n"
+    jornada["partidos"][str(numero)] = descripcion.strip()
+    guardar_datos(datos)
+    await ctx.send(f"Partido {numero} aÃ±adido a la jornada {jornada_id}: {descripcion}")
 
-    for usuario_id, partidos in pronos.items():
-        usuario = await bot.fetch_user(int(usuario_id))
-        mensaje += f"**{usuario.display_name}:**\n"
 
+# Comando: !partidos
+# Formato correcto: !partidos
+# Muestra los partidos configurados en la jornada activa.
+@bot.command(name="partidos")
+async def ver_partidos(ctx):
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await ctx.send("No hay jornada activa.")
+        return
+    if not jornada["partidos"]:
+        await ctx.send(f"La jornada {jornada_id} todavÃ­a no tiene partidos.")
+        return
+
+    lineas = [f"**Jornada {jornada_id}**"]
+    estado = "abierta" if jornada.get("abierta") else "cerrada"
+    lineas.append(f"Estado: {estado}")
+    for numero, descripcion in sorted(jornada["partidos"].items(), key=clave_partido):
+        lineas.append(f"`{numero}` - {descripcion}")
+    await ctx.send("\n".join(lineas))
+
+
+# Comando: !apostar
+# Formato correcto: !apostar <numero_partido> <signo>
+# Signos validos: 1, X o 2
+# Ejemplo: !apostar 1 X
+# Guarda o actualiza tu pronostico para un partido de la jornada activa.
+@bot.command(name="apostar")
+async def apostar(ctx, partido, signo):
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await ctx.send("No hay jornada activa.")
+        return
+    if not jornada.get("abierta"):
+        await ctx.send("La jornada estÃ¡ cerrada. Ya no se pueden cambiar pronÃ³sticos.")
+        return
+    if str(partido) not in jornada["partidos"]:
+        await ctx.send("Ese partido no existe en la jornada activa. Usa `!partidos`.")
+        return
+
+    try:
+        signo = normalizar_signo(signo)
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    usuario_id = str(ctx.author.id)
+    jornada["pronosticos"].setdefault(usuario_id, {})[str(partido)] = signo
+    guardar_datos(datos)
+    await ctx.send(f"PronÃ³stico guardado: partido {partido} -> {signo}.")
+
+
+# Comando: !mispronosticos
+# Formato correcto: !mispronosticos
+# Muestra los pronosticos guardados por quien ejecuta el comando.
+@bot.command(name="mispronosticos")
+async def mis_pronosticos(ctx):
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await ctx.send("No hay jornada activa.")
+        return
+
+    pronosticos = jornada["pronosticos"].get(str(ctx.author.id), {})
+    if not pronosticos:
+        await ctx.send("AÃºn no tienes pronÃ³sticos en la jornada activa.")
+        return
+
+    lineas = [f"**Tus pronÃ³sticos - Jornada {jornada_id}**"]
+    for partido, signo in sorted(pronosticos.items(), key=clave_partido):
+        descripcion = jornada["partidos"].get(partido, "Partido sin descripciÃ³n")
+        lineas.append(f"`{partido}` {descripcion}: **{signo}**")
+    await ctx.send("\n".join(lineas))
+
+
+# Comando: !verpronosticos
+# Formato correcto: !verpronosticos
+# Muestra todos los pronosticos registrados en la jornada activa.
+@bot.command(name="verpronosticos")
+async def ver_pronosticos(ctx):
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await ctx.send("No hay jornada activa.")
+        return
+    if not jornada["pronosticos"]:
+        await ctx.send("AÃºn no hay pronÃ³sticos registrados.")
+        return
+
+    lineas = [f"**PronÃ³sticos de la jornada {jornada_id}**"]
+    for usuario_id, pronosticos in jornada["pronosticos"].items():
+        lineas.append(f"**{await nombre_usuario(usuario_id)}**")
+        for partido, signo in sorted(pronosticos.items(), key=clave_partido):
+            lineas.append(f"`{partido}`: {signo}")
+    await ctx.send("\n".join(lineas))
+
+
+# Comando: !cerrarjornada
+# Formato correcto: !cerrarjornada
+# Permisos: solo administradores con permiso "Gestionar servidor".
+# Cierra la jornada activa para que no se puedan cambiar apuestas.
+@bot.command(name="cerrarjornada")
+@commands.check(es_admin)
+async def cerrar_jornada(ctx):
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await ctx.send("No hay jornada activa.")
+        return
+    jornada["abierta"] = False
+    guardar_datos(datos)
+    await ctx.send(f"Jornada {jornada_id} cerrada.")
+
+
+# Comando: !abrirjornada
+# Formato correcto: !abrirjornada
+# Permisos: solo administradores con permiso "Gestionar servidor".
+# Reabre la jornada activa para permitir apuestas o cambios.
+@bot.command(name="abrirjornada")
+@commands.check(es_admin)
+async def abrir_jornada(ctx):
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await ctx.send("No hay jornada activa.")
+        return
+    jornada["abierta"] = True
+    guardar_datos(datos)
+    await ctx.send(f"Jornada {jornada_id} abierta.")
+
+
+# Comando: !resultado
+# Formato correcto: !resultado <numero_partido> <signo>
+# Signos validos: 1, X o 2
+# Ejemplo: !resultado 1 2
+# Permisos: solo administradores con permiso "Gestionar servidor".
+# Guarda el resultado oficial y recalcula la clasificacion.
+@bot.command(name="resultado")
+@commands.check(es_admin)
+async def resultado(ctx, partido, signo):
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await ctx.send("No hay jornada activa.")
+        return
+    if str(partido) not in jornada["partidos"]:
+        await ctx.send("Ese partido no existe en la jornada activa.")
+        return
+
+    try:
+        signo = normalizar_signo(signo)
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    jornada["resultados"][str(partido)] = signo
+    recalcular_clasificacion(datos)
+    guardar_datos(datos)
+    await ctx.send(f"Resultado guardado: partido {partido} -> {signo}.")
+
+
+# Comando: !calcular
+# Formato correcto: !calcular
+# Permisos: solo administradores con permiso "Gestionar servidor".
+# Recalcula la clasificacion usando los resultados oficiales guardados.
+@bot.command(name="calcular")
+@commands.check(es_admin)
+async def calcular(ctx):
+    datos = cargar_datos()
+    recalcular_clasificacion(datos)
+    guardar_datos(datos)
+    await ctx.send("ClasificaciÃ³n recalculada.")
+
+
+# Comando: !clasificacion
+# Formato correcto: !clasificacion
+# Muestra la tabla general con puntos, aciertos y partidos jugados.
+@bot.command(name="clasificacion")
+async def clasificacion(ctx):
+    datos = cargar_datos()
+    recalcular_clasificacion(datos)
+    guardar_datos(datos)
+
+    tabla = datos["clasificacion"]
+    if not tabla:
+        await ctx.send("TodavÃ­a no hay puntos calculados.")
+        return
+
+    ordenada = sorted(
+        tabla.items(),
+        key=lambda item: (item[1]["puntos"], item[1]["aciertos"]),
+        reverse=True,
+    )
+    lineas = ["**ClasificaciÃ³n general**"]
+    for posicion, (usuario_id, fila) in enumerate(ordenada, start=1):
+        nombre = await nombre_usuario(usuario_id)
+        lineas.append(
+            f"{posicion}. **{nombre}** - {fila['puntos']} pts "
+            f"({fila['aciertos']}/{fila['jugados']} aciertos)"
+        )
+    await ctx.send("\n".join(lineas))
+
+
+# Comando: !penalizar
+# Formato correcto: !penalizar @usuario <puntos>
+# Ejemplo: !penalizar @Pepe 2
+# Permisos: solo administradores con permiso "Gestionar servidor".
+# Resta puntos al usuario indicado. El numero debe ser positivo.
+@bot.command(name="penalizar")
+@commands.check(es_admin)
+async def penalizar(ctx, miembro: discord.Member, puntos: int):
+    datos = cargar_datos()
+    usuario_id = str(miembro.id)
+    datos["penalizaciones"][usuario_id] = datos["penalizaciones"].get(usuario_id, 0) + puntos
+    recalcular_clasificacion(datos)
+    guardar_datos(datos)
+    await ctx.send(f"PenalizaciÃ³n aplicada a {miembro.display_name}: -{puntos} puntos.")
+
+# Comando: !pleno
+# Formato correcto: !pleno <goles-local>-<goles-visitante>
+# Ejemplo: !pleno 2-1
+# Guarda el pronostico del Pleno al 15 del usuario.
+@bot.command(name="pleno")
+async def pleno(ctx, resultado: str):
+    datos = cargar_datos()
+    usuario = str(ctx.author.id)
+
+    datos["pleno15"][usuario] = resultado
+
+    guardar_datos(datos)
+
+    await ctx.send(f"Pleno al 15 guardado para {ctx.author.display_name}: {resultado}")
+
+# Metodo interno.
+# Formato de entrada: {"usuario_id": "2-1", "otro_usuario_id": "1-1"}
+# Devuelve el Pleno al 15 calculado por media redondeada.
+def calcular_pleno_media(plenos):
+    if not plenos:
+        return None
+
+    goles1 = []
+    goles2 = []
+
+    for res in plenos.values():
+        g1, g2 = map(int, res.split("-"))
+        goles1.append(g1)
+        goles2.append(g2)
+
+    media1 = round(sum(goles1) / len(goles1))
+    media2 = round(sum(goles2) / len(goles2))
+
+    return f"{media1}-{media2}"
+
+
+# Metodo interno.
+# Formato de entrada: {"usuario_id": {"1": "X", "2": "1"}}
+# Devuelve el signo mas votado por cada partido.
+def calcular_mayorias(pronosticos):
+    conteo = {}
+
+    for usuario, partidos in pronosticos.items():
         for partido, signo in partidos.items():
-            mensaje += f"• Partido {partido}: {signo}\n"
+            if partido not in conteo:
+                conteo[partido] = []
+            conteo[partido].append(signo)
 
-        mensaje += "\n"
+    resultados = {}
 
-    await ctx.send(mensaje)
+    for partido, lista_signos in conteo.items():
+        signo_mas_votado = Counter(lista_signos).most_common(1)[0][0]
+        resultados[partido] = signo_mas_votado
+
+    return resultados
+
+
+# Comando: !calcularautomatico
+# Formato correcto: !calcularautomatico
+# Permisos: solo administradores con permiso "Gestionar servidor".
+# Calcula automaticamente el Pleno al 15 por media y los partidos por mayoria.
+@bot.command(name="calcularautomatico")
+@commands.check(es_admin)
+async def calcular_automatico(ctx):
+    datos = cargar_datos()
+
+    # 1) Pleno al 15 por media
+    pleno = calcular_pleno_media(datos["pleno15"])
+    datos["resultados"]["pleno15"] = pleno
+
+    # 2) 8 partidos por mayoria
+    mayorias = calcular_mayorias(datos["pronosticos"])
+    for partido, signo in mayorias.items():
+        datos["resultados"][partido] = signo
+
+    guardar_datos(datos)
+
+    await ctx.send("Resultados oficiales calculados automaticamente.")
+
+
+# Evento automatico: gestiona errores de comandos y envia mensajes claros al canal.
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("No tienes permisos para usar ese comando.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Faltan datos. Usa `!ayudaquiniela` para ver ejemplos.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("Algun dato no tiene el formato correcto. Usa `!ayudaquiniela`.")
+    elif isinstance(error, commands.CommandNotFound):
+        return
+    else:
+        await ctx.send("Ha ocurrido un error al ejecutar el comando.")
+        raise error
+
+
+if __name__ == "__main__":
+    if TOKEN != '':
+        bot.run(TOKEN)
