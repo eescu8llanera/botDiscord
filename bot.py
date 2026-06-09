@@ -34,7 +34,7 @@ DATOS_BASE = {
 }
 
 # ============================
-#   FUNCIONES INTERNAS
+#   UTILIDADES GENERALES/FUNCIONES INTERNAS
 # ============================
 
 def ahora_iso():
@@ -46,6 +46,17 @@ def normalizar_signo(signo):
     if signo not in SIGNOS_VALIDOS:
         raise ValueError("El signo debe ser 1, X o 2.")
     return signo
+
+async def nombre_usuario(usuario_id):
+    try:
+        usuario = await bot.fetch_user(int(usuario_id))
+        return usuario.display_name
+    except discord.DiscordException:
+        return f"Usuario {usuario_id}"
+
+
+def es_admin(ctx):
+    return ctx.author.guild_permissions.manage_guild
 
 
 def cargar_datos():
@@ -84,6 +95,9 @@ def descripcion_partido(jornada, partido):
         return f"Partido {partido} - {descripcion}"
     return f"Partido {partido}"
 
+# ==============================
+# CÁLCULO: CLASIFICACIÓN GENERAL
+# ==============================
 
 def recalcular_clasificacion(datos):
     clasificacion = {}
@@ -119,37 +133,21 @@ def recalcular_clasificacion(datos):
 
     datos["clasificacion"] = clasificacion
 
-
-async def nombre_usuario(usuario_id):
-    try:
-        usuario = await bot.fetch_user(int(usuario_id))
-        return usuario.display_name
-    except discord.DiscordException:
-        return f"Usuario {usuario_id}"
-
-
-def es_admin(ctx):
-    return ctx.author.guild_permissions.manage_guild
-
 # ============================
 #   CÁLCULO PLENO AL 15
 # ============================
 
 def calcular_pleno_media_jornada(jornada):
+
+     #"Calcula la media de goles del Pleno al 15 según los pronósticos de los usuarios."
+
     plenos = jornada.get("pleno15", {})
     if not plenos:
         return None
 
-    goles1 = []
-    goles2 = []
-
-    for res in plenos.values():
-        g1, g2 = map(int, res.split("-"))
-        goles1.append(g1)
-        goles2.append(g2)
-
-    media1 = round(sum(goles1) / len(goles1))
-    media2 = round(sum(goles2) / len(goles2))
+    goles = [tuple(map(int, p.split("-"))) for p in plenos.values()]
+    media1 = round(sum(g1 for g1, _ in goles) / len(goles))
+    media2 = round(sum(g2 for _, g2 in goles) / len(goles))
 
     return f"{media1}-{media2}"
 
@@ -158,29 +156,37 @@ def calcular_pleno_media_jornada(jornada):
 # ============================
 
 def calcular_elige8(pronosticos):
+
+    #"Calcula los 8 partidos con mayor consenso entre los usuarios.
+    # Devuelve un diccionario {partido: signo_mas_votado}. 
+
     conteo = {}
 
-    for usuario, partidos in pronosticos.items():
+# Recolectar signos por partido
+    for partidos in pronosticos.values():
         for partido, signo in partidos.items():
             conteo.setdefault(partido, []).append(signo)
 
-    porcentajes = {}
+# Calcular porcentaje del signo más común
+    porcentajes = {
+        partido: Counter(lista).most_common(1)[0][1] / len(lista)
+        for partido, lista in conteo.items()
+    }
+# Ordenar por porcentaje descendente
+    partidos_ordenados = sorted(
+        porcentajes.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
 
-    for partido, lista in conteo.items():
-        total = len(lista)
-        mas_comun = Counter(lista).most_common(1)[0][1]
-        porcentajes[partido] = mas_comun / total
-
-    partidos_ordenados = sorted(porcentajes.items(), key=lambda x: x[1], reverse=True)
+    # Tomar los 8 mejores
     elige8 = partidos_ordenados[:8]
 
-    resultados = {}
-
-    for partido, _ in elige8:
-        signo = Counter(conteo[partido]).most_common(1)[0][0]
-        resultados[partido] = signo
-
-    return resultados
+    # Resultado final
+    return {
+        partido: Counter(conteo[partido]).most_common(1)[0][0]
+        for partido, _ in elige8
+    }
 
 # ============================
 #   CLASIFICACIÓN GENERAL
@@ -602,32 +608,47 @@ async def pleno(ctx, resultado: str):
 # Ejemplo: !informe 8
 # Guarda el pronostico del Pleno al 15 del usuario.
 
-@bot.command()
+def calcular_elige8(pronosticos):
+    conteo = {}
+
+    # Recolectar signos por partido
+    for partidos in pronosticos.values():
+        for partido, signo in partidos.items():
+            conteo.setdefault(partido, []).append(signo)
+
+    # Calcular porcentaje del signo más común
+    porcentajes = {
+        partido: Counter(lista).most_common(1)[0][1] / len(lista)
+        for partido, lista in conteo.items()
+    }
+
+    # Ordenar por porcentaje
+    partidos_ordenados = sorted(
+        porcentajes.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    # Tomar los 8 mejores
+    elige8 = partidos_ordenados[:8]
+
+    # Resultado final
+    return {
+        partido: Counter(conteo[partido]).most_common(1)[0][0]
+        for partido, _ in elige8
+    }
+
+
+@bot.command(name="informe8")
 async def informe8(ctx):
     datos = cargar_datos()
-    pronosticos = datos["pronosticos"]
+    resultados = calcular_elige8(datos["pronosticos"])
 
-    if not pronosticos:
-        await ctx.send("❌ No hay pronósticos registrados todavía.")
-        return
+    lineas = ["**Informe ELIGE8**"]
+    for partido, signo in resultados.items():
+        lineas.append(f"Partido {partido}: **{signo}**")
 
-    conteo = {}  # { partido: [lista de signos] }
-
-    # Reunir todos los signos por partido
-    for usuario, partidos in pronosticos.items():
-        for partido, signo in partidos.items():
-            if partido not in conteo:
-                conteo[partido] = []
-            conteo[partido].append(signo)
-
-    porcentajes = {}  # { partido: porcentaje_mayor }
-
-    # Calcular porcentaje mayoritario por partido
-    for partido, lista_signos in conteo.items():
-        total = len(lista_signos)
-        mas_comun = Counter(lista_signos).most_common(1)[0][1]
-        porcentaje = mas_comun / total
-        porcentajes[partido] = porcentaje
+    await ctx.send("\n".join(lineas))
 
     # Ordenar partidos por consenso
     partidos_ordenados = sorted(porcentajes.items(), key=lambda x: x[1], reverse=True)
