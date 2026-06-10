@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -149,6 +150,36 @@ def validar_pleno(pleno):
 
     return pleno
 
+
+def texto_ayuda_quiniela():
+    """Devuelve el texto de ayuda compartido por comandos ! y /."""
+    return (
+        "**Ayuda de la quiniela**\n\n"
+        "**Para jugar**\n"
+        "`!partidos` o `/partidos` - muestra los partidos de la jornada activa.\n"
+        "`!apostar <14 signos> <pleno>` o `/apostar pronos pleno` - guarda tus 14 pronósticos y el Pleno al 15.\n"
+        "Ejemplo: `!apostar 1X12X212X112X1 2-0`\n"
+        "Los 14 signos van seguidos, sin espacios. Cada signo debe ser `1`, `X` o `2`.\n"
+        "`1` gana el equipo local, `X` empate, `2` gana el visitante.\n"
+        "El pleno se escribe como marcador: `goles-local-goles-visitante`.\n"
+        "`!mispronosticos` o `/mispronosticos` - muestra tus apuestas con el nombre de cada partido.\n"
+        "`!verpronosticos` o `/verpronosticos` - muestra todas las apuestas con el nombre de cada partido.\n"
+        "`!pleno <marcador>` o `/pleno resultado` - cambia solo tu Pleno al 15.\n"
+        "`!clasificacion` o `/clasificacion` - muestra la clasificación general.\n\n"
+        "**Administración**\n"
+        "`!crearjornada <numero>` o `/crearjornada numero` - crea y activa una jornada.\n"
+        "`!partido <numero> <local> vs <visitante>` o `/partido numero descripcion` - añade o cambia un partido.\n"
+        "Ejemplo: `!partido 1 España vs Cabo Verde`\n"
+        "Para el Pleno al 15 puedes usar `!partido 15 Italia vs Rumania`.\n"
+        "`!cerrarjornada` / `!abrirjornada` o `/cerrarjornada` / `/abrirjornada` - cierra o reabre las apuestas.\n"
+        "`!resultado <numero> <1|X|2>` o `/resultado partido signo` - guarda el resultado oficial.\n"
+        "`!calcular` o `/calcular` - recalcula la clasificación.\n"
+        "`!calcularautomatico` o `/calcularautomatico` - calcula resultados por consenso y pleno medio.\n"
+        "`!elige8` o `/elige8` - muestra los 8 partidos con mayor consenso.\n"
+        "`!penalizar @usuario <puntos>` o `/penalizar usuario puntos` - resta puntos a un usuario.\n"
+        "`!limpiardatos CONFIRMAR` o `/limpiardatos confirmacion:CONFIRMAR` - borra todos los datos guardados. Admin."
+    )
+
 # ==============================
 # CÁLCULO: CLASIFICACIÓN GENERAL
 # ==============================
@@ -213,6 +244,7 @@ def calcular_pleno_media_jornada(jornada):
 @bot.event
 async def on_ready():
     """Avisa por consola cuando el bot se conecta correctamente."""
+    await bot.tree.sync()
     print(f"Bot conectado como {bot.user}")
 
 
@@ -231,32 +263,7 @@ async def ping(ctx):
 @bot.command(name="ayudaquiniela")
 async def ayuda_quiniela(ctx):
     """Muestra una guía de comandos y formatos de la quiniela."""
-    await ctx.send(
-        "**Ayuda de la quiniela**\n\n"
-        "**Para jugar**\n"
-        "`!partidos` - muestra los partidos de la jornada activa.\n"
-        "`!apostar <14 signos> <pleno>` - guarda tus 14 pronósticos y el Pleno al 15.\n"
-        "Ejemplo: `!apostar 1X12X212X112X1 2-0`\n"
-        "Los 14 signos van seguidos, sin espacios. Cada signo debe ser `1`, `X` o `2`.\n"
-        "`1` gana el equipo local, `X` empate, `2` gana el visitante.\n"
-        "El pleno se escribe como marcador: `goles-local-goles-visitante`.\n"
-        "`!mispronosticos` - muestra tus apuestas con el nombre de cada partido.\n"
-        "`!verpronosticos` - muestra todas las apuestas con el nombre de cada partido.\n"
-        "`!pleno <marcador>` - cambia solo tu Pleno al 15. Ejemplo: `!pleno 2-1`\n"
-        "`!clasificacion` - muestra la clasificación general.\n\n"
-        "**Administración**\n"
-        "`!crearjornada <numero>` - crea y activa una jornada.\n"
-        "`!partido <numero> <local> vs <visitante>` - añade o cambia un partido.\n"
-        "Ejemplo: `!partido 1 España vs Cabo Verde`\n"
-        "Para el Pleno al 15 puedes usar `!partido 15 Italia vs Rumania`.\n"
-        "`!cerrarjornada` / `!abrirjornada` - cierra o reabre las apuestas.\n"
-        "`!resultado <numero> <1|X|2>` - guarda el resultado oficial de un partido.\n"
-        "`!calcular` - recalcula la clasificación.\n"
-        "`!calcularautomatico` - calcula resultados por consenso y pleno medio.\n"
-        "`!elige8` - muestra los 8 partidos con mayor consenso.\n"
-        "`!penalizar @usuario <puntos>` - resta puntos a un usuario.\n"
-        "`!limpiardatos CONFIRMAR` - borra todos los datos guardados. Admin."
-    )
+    await ctx.send(texto_ayuda_quiniela())
 
 
 # Comando: !crearjornada
@@ -796,6 +803,426 @@ def calcular_elige8(pronosticos):
         resultados[partido] = signo
 
     return resultados
+
+# ============================
+#   COMANDOS SLASH (/)
+# ============================
+
+async def enviar_interaccion(interaction, mensaje, ephemeral=False):
+    """Envía una respuesta slash, usando followup si ya hubo respuesta inicial."""
+    if interaction.response.is_done():
+        await interaction.followup.send(mensaje, ephemeral=ephemeral)
+    else:
+        await interaction.response.send_message(mensaje, ephemeral=ephemeral)
+
+
+def usuario_es_admin(interaction):
+    """Comprueba permisos de admin en un comando slash."""
+    return bool(interaction.user.guild_permissions.manage_guild)
+
+
+async def rechazar_si_no_admin(interaction):
+    """Responde y bloquea el comando slash si el usuario no es admin."""
+    if usuario_es_admin(interaction):
+        return False
+
+    await enviar_interaccion(interaction, "No tienes permisos para usar ese comando.", ephemeral=True)
+    return True
+
+
+@bot.tree.command(name="ayudaquiniela", description="Muestra la ayuda de comandos de la quiniela.")
+async def slash_ayudaquiniela(interaction: discord.Interaction):
+    """Comando slash: muestra la ayuda de la quiniela."""
+    await enviar_interaccion(interaction, texto_ayuda_quiniela())
+
+
+@bot.tree.command(name="ping", description="Comprueba que el bot responde.")
+async def slash_ping(interaction: discord.Interaction):
+    """Comando slash: responde Pong."""
+    await enviar_interaccion(interaction, "Pong.")
+
+
+@bot.tree.command(name="crearjornada", description="Crea y activa una jornada. Admin.")
+@app_commands.describe(numero="Número o identificador de la jornada.")
+@app_commands.default_permissions(manage_guild=True)
+async def slash_crearjornada(interaction: discord.Interaction, numero: str):
+    """Comando slash: crea una jornada y la marca como activa."""
+    if await rechazar_si_no_admin(interaction):
+        return
+
+    datos = cargar_datos()
+    jornada_id = str(numero)
+    datos["jornadas"].setdefault(
+        jornada_id,
+        {
+            "abierta": True,
+            "partidos": {},
+            "pronosticos": {},
+            "pleno15": {},
+            "resultados": {},
+            "creada_en": ahora_iso(),
+        },
+    )
+    datos["jornada_activa"] = jornada_id
+    guardar_datos(datos)
+    await enviar_interaccion(interaction, f"Jornada {jornada_id} creada y activada.")
+
+
+@bot.tree.command(name="partido", description="Añade o cambia un partido de la jornada activa. Admin.")
+@app_commands.describe(numero="Número del partido.", descripcion="Equipos del partido. Ejemplo: España vs Cabo Verde")
+@app_commands.default_permissions(manage_guild=True)
+async def slash_partido(interaction: discord.Interaction, numero: str, descripcion: str):
+    """Comando slash: añade o actualiza un partido."""
+    if await rechazar_si_no_admin(interaction):
+        return
+
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "Primero crea una jornada con `/crearjornada numero`.")
+        return
+
+    jornada["partidos"][str(numero)] = descripcion.strip()
+    guardar_datos(datos)
+    await enviar_interaccion(interaction, f"{descripcion_partido(jornada, numero)} añadido a la jornada {jornada_id}.")
+
+
+@bot.tree.command(name="partidos", description="Muestra los partidos de la jornada activa.")
+async def slash_partidos(interaction: discord.Interaction):
+    """Comando slash: muestra los partidos de la jornada activa."""
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+    if not jornada["partidos"]:
+        await enviar_interaccion(interaction, f"La jornada {jornada_id} todavía no tiene partidos.")
+        return
+
+    lineas = [f"**Jornada {jornada_id}**"]
+    estado = "abierta" if jornada.get("abierta") else "cerrada"
+    lineas.append(f"Estado: {estado}")
+    for numero, descripcion in sorted(jornada["partidos"].items(), key=clave_partido):
+        etiqueta_pleno = " (Pleno al 15)" if str(numero) == "15" else ""
+        lineas.append(f"`{numero}` - {descripcion}{etiqueta_pleno}")
+    if "15" not in jornada["partidos"]:
+        lineas.append("`15` - Pleno al 15")
+    await enviar_interaccion(interaction, "\n".join(lineas))
+
+
+@bot.tree.command(name="apostar", description="Guarda tus 14 pronósticos y el Pleno al 15.")
+@app_commands.describe(pronos="14 signos seguidos. Ejemplo: 1X12X212X112X1", pleno="Marcador del pleno. Ejemplo: 2-0")
+async def slash_apostar(interaction: discord.Interaction, pronos: str, pleno: str):
+    """Comando slash: guarda los pronósticos del usuario."""
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    usuario = str(interaction.user.id)
+
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa. Pide a un admin que use `/crearjornada`.")
+        return
+    if not jornada.get("abierta"):
+        await enviar_interaccion(interaction, "La jornada está cerrada y no acepta apuestas.")
+        return
+    if len(pronos) != 14:
+        await enviar_interaccion(interaction, "Debes enviar exactamente 14 signos (1, X o 2). Ejemplo: `1X12X212X112X1`")
+        return
+
+    for signo in pronos:
+        if signo.upper() not in SIGNOS_VALIDOS:
+            await enviar_interaccion(interaction, "Solo se permiten signos `1`, `X` o `2`.")
+            return
+
+    try:
+        pleno = validar_pleno(pleno)
+    except ValueError as error:
+        await enviar_interaccion(interaction, str(error))
+        return
+
+    jornada["pronosticos"].setdefault(usuario, {})
+    for partido, signo in enumerate(pronos, start=1):
+        jornada["pronosticos"][usuario][str(partido)] = signo.upper()
+    jornada["pleno15"][usuario] = pleno
+
+    guardar_datos(datos)
+
+    resumen = [f"{descripcion_partido(jornada, partido)}: **{signo}**" for partido, signo in sorted(
+        jornada["pronosticos"][usuario].items(),
+        key=clave_partido,
+    )]
+    await enviar_interaccion(
+        interaction,
+        f"Jornada {jornada_id} registrada para **{interaction.user.display_name}**\n"
+        + "\n".join(resumen)
+        + f"\n`15` Pleno al 15: **{pleno}**",
+    )
+
+
+@bot.tree.command(name="mispronosticos", description="Muestra tus pronósticos de la jornada activa.")
+async def slash_mispronosticos(interaction: discord.Interaction):
+    """Comando slash: muestra los pronósticos del usuario."""
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+
+    pronosticos = jornada["pronosticos"].get(str(interaction.user.id), {})
+    if not pronosticos:
+        await enviar_interaccion(interaction, "Aún no tienes pronósticos en la jornada activa.")
+        return
+
+    lineas = [f"**Tus pronósticos - Jornada {jornada_id}**"]
+    for partido, signo in sorted(pronosticos.items(), key=clave_partido):
+        lineas.append(f"{descripcion_partido(jornada, partido)}: **{signo}**")
+
+    pleno = jornada["pleno15"].get(str(interaction.user.id))
+    if pleno:
+        lineas.append(f"`15` Pleno al 15: **{pleno}**")
+    await enviar_interaccion(interaction, "\n".join(lineas))
+
+
+@bot.tree.command(name="verpronosticos", description="Muestra todos los pronósticos de la jornada activa.")
+async def slash_verpronosticos(interaction: discord.Interaction):
+    """Comando slash: muestra todos los pronósticos."""
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+
+    usuarios = set(jornada["pronosticos"].keys()) | set(jornada["pleno15"].keys())
+    if not usuarios:
+        await enviar_interaccion(interaction, "No hay pronósticos.")
+        return
+
+    lineas = [f"**Pronósticos Jornada {jornada_id}**"]
+    for usuario_id in usuarios:
+        nombre = await nombre_usuario(usuario_id)
+        lineas.append(f"\n**{nombre}**")
+
+        pronos = jornada["pronosticos"].get(usuario_id, {})
+        for partido, signo in sorted(pronos.items(), key=clave_partido):
+            lineas.append(f"{descripcion_partido(jornada, partido)}: **{signo}**")
+
+        pleno = jornada["pleno15"].get(usuario_id)
+        if pleno:
+            lineas.append(f"`15` Pleno al 15: **{pleno}**")
+
+    await enviar_interaccion(interaction, "\n".join(lineas))
+
+
+@bot.tree.command(name="cerrarjornada", description="Cierra la jornada activa. Admin.")
+@app_commands.default_permissions(manage_guild=True)
+async def slash_cerrarjornada(interaction: discord.Interaction):
+    """Comando slash: cierra la jornada activa."""
+    if await rechazar_si_no_admin(interaction):
+        return
+
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+    jornada["abierta"] = False
+    guardar_datos(datos)
+    await enviar_interaccion(interaction, f"Jornada {jornada_id} cerrada.")
+
+
+@bot.tree.command(name="abrirjornada", description="Reabre la jornada activa. Admin.")
+@app_commands.default_permissions(manage_guild=True)
+async def slash_abrirjornada(interaction: discord.Interaction):
+    """Comando slash: abre la jornada activa."""
+    if await rechazar_si_no_admin(interaction):
+        return
+
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+    jornada["abierta"] = True
+    guardar_datos(datos)
+    await enviar_interaccion(interaction, f"Jornada {jornada_id} abierta.")
+
+
+@bot.tree.command(name="resultado", description="Guarda el resultado oficial de un partido. Admin.")
+@app_commands.describe(partido="Número del partido.", signo="Resultado: 1, X o 2.")
+@app_commands.choices(signo=[
+    app_commands.Choice(name="1 - gana local", value="1"),
+    app_commands.Choice(name="X - empate", value="X"),
+    app_commands.Choice(name="2 - gana visitante", value="2"),
+])
+@app_commands.default_permissions(manage_guild=True)
+async def slash_resultado(interaction: discord.Interaction, partido: str, signo: app_commands.Choice[str]):
+    """Comando slash: guarda un resultado oficial."""
+    if await rechazar_si_no_admin(interaction):
+        return
+
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+    if str(partido) not in jornada["partidos"]:
+        await enviar_interaccion(interaction, "Ese partido no existe en la jornada activa.")
+        return
+
+    jornada["resultados"][str(partido)] = signo.value
+    recalcular_clasificacion(datos)
+    guardar_datos(datos)
+    await enviar_interaccion(interaction, f"Resultado guardado: {descripcion_partido(jornada, partido)} -> **{signo.value}**.")
+
+
+@bot.tree.command(name="calcular", description="Recalcula la clasificación. Admin.")
+@app_commands.default_permissions(manage_guild=True)
+async def slash_calcular(interaction: discord.Interaction):
+    """Comando slash: recalcula la clasificación."""
+    if await rechazar_si_no_admin(interaction):
+        return
+
+    datos = cargar_datos()
+    recalcular_clasificacion(datos)
+    guardar_datos(datos)
+    await enviar_interaccion(interaction, "Clasificación recalculada.")
+
+
+@bot.tree.command(name="clasificacion", description="Muestra la clasificación general.")
+async def slash_clasificacion(interaction: discord.Interaction):
+    """Comando slash: muestra la clasificación."""
+    datos = cargar_datos()
+    recalcular_clasificacion(datos)
+    guardar_datos(datos)
+
+    tabla = datos["clasificacion"]
+    if not tabla:
+        await enviar_interaccion(interaction, "Todavía no hay puntos calculados.")
+        return
+
+    ordenada = sorted(
+        tabla.items(),
+        key=lambda item: (item[1]["puntos"], item[1]["aciertos"]),
+        reverse=True,
+    )
+    lineas = ["**Clasificación general**"]
+    for posicion, (usuario_id, fila) in enumerate(ordenada, start=1):
+        nombre = await nombre_usuario(usuario_id)
+        lineas.append(
+            f"{posicion}. **{nombre}** - {fila['puntos']} pts "
+            f"({fila['aciertos']}/{fila['jugados']} aciertos)"
+        )
+    await enviar_interaccion(interaction, "\n".join(lineas))
+
+
+@bot.tree.command(name="penalizar", description="Resta puntos a un usuario. Admin.")
+@app_commands.describe(usuario="Usuario al que penalizar.", puntos="Puntos a restar.")
+@app_commands.default_permissions(manage_guild=True)
+async def slash_penalizar(interaction: discord.Interaction, usuario: discord.Member, puntos: int):
+    """Comando slash: aplica una penalización."""
+    if await rechazar_si_no_admin(interaction):
+        return
+
+    datos = cargar_datos()
+    usuario_id = str(usuario.id)
+    datos["penalizaciones"][usuario_id] = datos["penalizaciones"].get(usuario_id, 0) + puntos
+    recalcular_clasificacion(datos)
+    guardar_datos(datos)
+    await enviar_interaccion(interaction, f"Penalización aplicada a {usuario.display_name}: -{puntos} puntos.")
+
+
+@bot.tree.command(name="limpiardatos", description="Borra todos los datos guardados. Admin.")
+@app_commands.describe(confirmacion="Escribe CONFIRMAR para borrar todo.")
+@app_commands.default_permissions(manage_guild=True)
+async def slash_limpiardatos(interaction: discord.Interaction, confirmacion: str):
+    """Comando slash: reinicia todos los datos guardados."""
+    if await rechazar_si_no_admin(interaction):
+        return
+    if confirmacion != "CONFIRMAR":
+        await enviar_interaccion(
+            interaction,
+            "Este comando borra jornadas, partidos, pronósticos, resultados y clasificación. "
+            "Para confirmar usa `/limpiardatos confirmacion:CONFIRMAR`.",
+            ephemeral=True,
+        )
+        return
+
+    guardar_datos(datos_vacios())
+    await enviar_interaccion(interaction, "Todos los datos de la quiniela se han borrado.")
+
+
+@bot.tree.command(name="pleno", description="Cambia solo tu Pleno al 15.")
+@app_commands.describe(resultado="Marcador del pleno. Ejemplo: 2-1")
+async def slash_pleno(interaction: discord.Interaction, resultado: str):
+    """Comando slash: guarda el pleno del usuario."""
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    usuario = str(interaction.user.id)
+
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+    if not jornada.get("abierta"):
+        await enviar_interaccion(interaction, "La jornada está cerrada y no acepta cambios.")
+        return
+
+    try:
+        resultado = validar_pleno(resultado)
+    except ValueError as error:
+        await enviar_interaccion(interaction, str(error))
+        return
+
+    jornada["pleno15"][usuario] = resultado
+    guardar_datos(datos)
+    await enviar_interaccion(interaction, f"Pleno al 15 guardado para {interaction.user.display_name} en la jornada {jornada_id}: {resultado}")
+
+
+@bot.tree.command(name="elige8", description="Muestra los 8 partidos con mayor consenso.")
+async def slash_elige8(interaction: discord.Interaction):
+    """Comando slash: muestra el informe Elige8."""
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+    if not jornada["pronosticos"]:
+        await enviar_interaccion(interaction, "Todavía no hay pronósticos registrados.")
+        return
+
+    resultados = calcular_elige8(jornada["pronosticos"])
+    lineas = [f"**Informe ELIGE8 - Jornada {jornada_id}**"]
+    for partido, signo in resultados.items():
+        lineas.append(f"{descripcion_partido(jornada, partido)}: **{signo}**")
+    await enviar_interaccion(interaction, "\n".join(lineas))
+
+
+@bot.tree.command(name="calcularautomatico", description="Calcula resultados por consenso y pleno medio. Admin.")
+@app_commands.default_permissions(manage_guild=True)
+async def slash_calcularautomatico(interaction: discord.Interaction):
+    """Comando slash: calcula resultados automáticos."""
+    if await rechazar_si_no_admin(interaction):
+        return
+
+    datos = cargar_datos()
+    jornada_id, jornada = jornada_actual(datos)
+    if not jornada:
+        await enviar_interaccion(interaction, "No hay jornada activa.")
+        return
+
+    pleno = calcular_pleno_media_jornada(jornada)
+    if pleno:
+        jornada["resultados"]["pleno15"] = pleno
+
+    elige8 = calcular_elige8(jornada["pronosticos"])
+    for partido, signo in elige8.items():
+        jornada["resultados"][partido] = signo
+
+    guardar_datos(datos)
+
+    lineas = [f"Resultados calculados para la jornada {jornada_id}."]
+    for partido, signo in elige8.items():
+        lineas.append(f"{descripcion_partido(jornada, partido)}: **{signo}**")
+    lineas.append(f"`15` Pleno al 15: **{pleno or 'sin pronósticos'}**")
+    await enviar_interaccion(interaction, "\n".join(lineas))
 
 # ============================
 #   ERRORES
